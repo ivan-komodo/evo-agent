@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  evo-agent:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./agent_data:/app/agent_data
+      - ./extensions:/app/extensions
+      - ./workspace:/app/workspace
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro

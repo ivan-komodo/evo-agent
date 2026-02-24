@@ -1,0 +1,6 @@
+agent:
+  name: "Evo"
+  language: "ru"
+  autonomy_level: 1
+  max_iterations: 25
+  style: "helpful, concise"

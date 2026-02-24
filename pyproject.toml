@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evo-agent"
+version = "0.1.0"
+description = "Легковесный самомодифицирующийся AI-агент"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.0",
+    "aiogram>=3.0",
+    "httpx>=0.25",
+    "beautifulsoup4>=4.12",
+    "markdownify>=0.11",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "gitpython>=3.1",
+    "python-dotenv>=1.0",
+    "aiosqlite>=0.19",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[project.scripts]
+evo-agent = "evo_agent.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,38 @@
+llm:
+  provider: "openai_compat"
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o"
+  api_key: "${OPENAI_API_KEY}"
+  max_tokens: 4096
+  temperature: 0.7
+
+interfaces:
+  telegram:
+    enabled: true
+    token: "${TELEGRAM_BOT_TOKEN}"
+    allowed_users: []  # пустой = все разрешены
+
+tools:
+  shell:
+    enabled: true
+    default_shell: "powershell"
+    timeout: 60
+    working_directory: "./workspace"
+  web_fetch:
+    enabled: true
+    timeout: 30
+    user_agent: "EvoAgent/1.0"
+  web_search:
+    enabled: false
+    provider: "brave"
+    api_key: "${BRAVE_API_KEY}"
+  web_browser:
+    enabled: false
+
+memory:
+  max_conversation_messages: 50
+  auto_summarize_after: 30
+
+git:
+  auto_commit: true
+  repo_path: "."
