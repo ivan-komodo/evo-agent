@@ -6,8 +6,10 @@ import logging
 import traceback
 from typing import Any
 
+from evo_agent.core.action_journal import ActionJournal, JournalEntry
 from evo_agent.core.autonomy import AutonomyManager
 from evo_agent.core.context import ContextBuilder
+from evo_agent.core.monitor import AgentMonitor
 from evo_agent.core.types import (
     AutonomyLevel,
     Message,
@@ -20,6 +22,7 @@ from evo_agent.knowledge.loader import KnowledgeLoader
 from evo_agent.knowledge.manager import KnowledgeManager
 from evo_agent.llm.base import LLMProvider
 from evo_agent.memory.conversation import ConversationStore
+from evo_agent.memory.summarizer import ConversationSummarizer
 from evo_agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,9 @@ class Agent:
         autonomy: AutonomyManager,
         interface: BaseInterface,
         conversation_store: ConversationStore | None = None,
+        summarizer: ConversationSummarizer | None = None,
+        monitor: AgentMonitor | None = None,
+        journal: ActionJournal | None = None,
         max_iterations: int = 25,
     ):
         self._llm = llm
@@ -46,11 +52,14 @@ class Agent:
         self._autonomy = autonomy
         self._interface = interface
         self._conversation_store = conversation_store
+        self._summarizer = summarizer
+        self._monitor = monitor
+        self._journal = journal
         self._max_iterations = max_iterations
 
         self._context_builder = ContextBuilder(
             knowledge_loader=knowledge_loader,
-            tool_names=tool_registry.list_names(),
+            tool_registry=tool_registry,
         )
 
         self._conversations: dict[str, list[Message]] = {}
@@ -80,13 +89,65 @@ class Agent:
         await self._interface.stop()
         logger.info("Агент остановлен")
 
+    async def reload_tools(self) -> str:
+        """Перезагрузить инструменты без рестарта агента."""
+        count = self._tools.full_reload()
+        return f"Инструменты перезагружены: {count} штук ({', '.join(self._tools.list_names())})"
+
+    async def reload_config(self) -> str:
+        """Перезагрузить конфигурацию и обновить компоненты."""
+        from evo_agent.core.config import load_config, get_project_root
+        project_root = get_project_root()
+        config = load_config(project_root / "config.yaml")
+        
+        # Обновляем список разрешенных пользователей в Telegram
+        if self._interface.name == "telegram":
+            tg_config = config.get("interfaces", {}).get("telegram", {})
+            allowed = tg_config.get("allowed_users", [])
+            # Используем динамический вызов метода, если он есть
+            if hasattr(self._interface, "update_allowed_users"):
+                self._interface.update_allowed_users(allowed or None)
+        
+        # Перезагружаем инструменты с новым конфигом
+        agent_data_dir = project_root / "agent_data"
+        # Нам нужно передать актуальный people_db, но он уже есть в registry если был настроен
+        self._tools.configure(
+            config=config,
+            extensions_dir=project_root / "extensions",
+            skills_dir=agent_data_dir / "skills",
+            project_root=project_root,
+            people_db=self._tools._people_db # Сохраняем ссылку на БД
+        )
+        self._tools.full_reload()
+        
+        return "Конфигурация и список пользователей обновлены."
+
     async def _handle_message(self, text: str, user_info: UserInfo) -> None:
         """Обработка входящего сообщения с полной обработкой ошибок."""
         user_id = user_info.user_id
+        if self._monitor:
+            self._monitor.record_message()
+
+        # Автоматическая регистрация пользователя в PeopleDB при первом контакте
+        try:
+            if self._tools.get("people"):
+                # Мы не можем вызвать tool напрямую легко, но можем через PeopleDB если она есть
+                # В __main__ мы прокидываем people_db в registry._people_db
+                people_db = getattr(self._tools, "_people_db", None)
+                if people_db:
+                    await people_db.create_person(
+                        name=user_info.name or f"User_{user_id}",
+                        source_type=user_info.source_type,
+                        source_id=user_info.source_id or user_id
+                    )
+        except Exception:
+            logger.exception("Ошибка авто-регистрации пользователя %s", user_id)
 
         try:
             await self._process_message(text, user_info)
         except Exception as e:
+            if self._monitor:
+                self._monitor.record_error()
             logger.exception("Необработанная ошибка при обработке сообщения от %s", user_id)
             try:
                 await self._interface.send_message(
@@ -127,6 +188,24 @@ class Agent:
             await self._interface.send_message(user_id, memory or "Память пуста.")
             return
 
+        if text == "__reload_tools":
+            msg = await self.reload_tools()
+            await self._interface.send_message(user_id, msg)
+            return
+
+        if text == "__reload_config":
+            msg = await self.reload_config()
+            await self._interface.send_message(user_id, msg)
+            return
+
+        if text == "__get_health":
+            if self._monitor:
+                report = self._monitor.build_report(len(self._conversations))
+                await self._interface.send_message(user_id, report)
+            else:
+                await self._interface.send_message(user_id, "Мониторинг не активен.")
+            return
+
         logger.info("Сообщение от %s (%s): %s",
                      user_info.name or "?", user_id, text[:100])
 
@@ -136,6 +215,15 @@ class Agent:
 
         if self._conversation_store:
             await self._conversation_store.save_message(user_id, user_msg)
+
+        # -- Суммаризация перед циклом --
+        if self._summarizer:
+            try:
+                summarized = await self._summarizer.maybe_summarize(user_id)
+                if summarized:
+                    logger.info("Суммаризация применена для user=%s", user_id)
+            except Exception:
+                logger.exception("Ошибка суммаризации для user=%s", user_id)
 
         await self._run_agent_loop(user_id, user_info, conversation)
 
@@ -150,11 +238,23 @@ class Agent:
         tools_schema = self._tools.to_openai_tools()
 
         for iteration in range(self._max_iterations):
+            # -- Инъекция восприятия (ActionJournal) --
+            perception = self._journal.format_for_llm(user_id) if self._journal else None
+            if perception:
+                # Добавляем как системное сообщение непосредственно перед генерацией
+                conversation.append(Message(role="system", content=perception))
+                if self._conversation_store:
+                    await self._conversation_store.save_message(user_id, conversation[-1])
+
             messages = self._context_builder.build_messages(system_prompt, conversation)
 
             try:
                 response = await self._llm.chat(messages, tools_schema if tools_schema else None)
+                if self._monitor:
+                    self._monitor.record_llm_call(response.usage)
             except Exception as e:
+                if self._monitor:
+                    self._monitor.record_error()
                 logger.exception("Ошибка LLM на итерации %d", iteration)
                 await self._interface.send_message(
                     user_id,
@@ -193,14 +293,23 @@ class Agent:
                 conversation.append(assistant_msg)
                 if self._conversation_store:
                     await self._conversation_store.save_message(user_id, assistant_msg)
-                await self._interface.send_message(user_id, response.text)
+                
+                delivered = await self._interface.send_message(user_id, response.text)
+                if self._journal:
+                    from datetime import datetime
+                    self._journal.record(JournalEntry(
+                        timestamp=datetime.now(),
+                        event_type="delivery_ok" if delivered else "delivery_fail",
+                        summary=f"Сообщение доставлено пользователю {user_id}" if delivered else f"НЕ удалось доставить сообщение пользователю {user_id}",
+                        user_id=user_id,
+                    ))
                 return
 
             await self._interface.send_message(user_id, "(пустой ответ от LLM)")
             return
 
         await self._interface.send_message(
-            user_id, f"⚠️ Достигнут лимит итераций ({self._max_iterations})"
+            user_id, f"[!] Достигнут лимит итераций ({self._max_iterations})"
         )
 
     async def _execute_tool(self, user_id: str, tool_call: ToolCall) -> ToolResult:
@@ -232,16 +341,48 @@ class Agent:
                      ", ".join(f"{k}={v!r}" for k, v in list(tool_call.arguments.items())[:3]))
         try:
             result = await tool.execute(tool_call_id=tool_call.id, **tool_call.arguments)
+            
+            # Обогащаем результат префиксами
+            if result.success:
+                result.content = f"[OK] {result.content}"
+            else:
+                result.content = f"[ОШИБКА] {result.content}"
+
+            # Записываем в ActionJournal
+            if self._journal:
+                from datetime import datetime
+                self._journal.record(JournalEntry(
+                    timestamp=datetime.now(),
+                    event_type="tool_ok" if result.success else "tool_fail",
+                    summary=f"Инструмент {tool_call.name}: {'успех' if result.success else 'ошибка'}",
+                    details=result.content[:500],
+                    user_id=user_id,
+                ))
+
+            if self._monitor and result.success:
+                self._monitor.record_tool_call(tool_call.name)
             log_level = logging.INFO if result.success else logging.WARNING
             logger.log(log_level, "Tool %s: success=%s, len=%d",
                        tool_call.name, result.success, len(result.content))
             return result
         except Exception as e:
             logger.exception("Ошибка выполнения tool %s", tool_call.name)
+            err_msg = f"Ошибка выполнения: {type(e).__name__}: {e}"
+            
+            if self._journal:
+                from datetime import datetime
+                self._journal.record(JournalEntry(
+                    timestamp=datetime.now(),
+                    event_type="tool_fail",
+                    summary=f"Инструмент {tool_call.name}: критическая ошибка",
+                    details=err_msg,
+                    user_id=user_id,
+                ))
+
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
-                content=f"Ошибка выполнения: {type(e).__name__}: {e}",
+                content=f"[ОШИБКА] {err_msg}",
                 success=False,
             )
 

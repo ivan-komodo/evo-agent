@@ -13,9 +13,9 @@ from evo_agent.knowledge.loader import KnowledgeLoader
 class ContextBuilder:
     """Собирает system prompt для LLM из всех источников знаний."""
 
-    def __init__(self, knowledge_loader: KnowledgeLoader, tool_names: list[str]):
+    def __init__(self, knowledge_loader: KnowledgeLoader, tool_registry: Any):
         self._loader = knowledge_loader
-        self._tool_names = tool_names
+        self._tool_registry = tool_registry
 
     def build_system_prompt(self, user_info: UserInfo | None = None) -> str:
         """Собрать полный system prompt."""
@@ -53,7 +53,7 @@ class ContextBuilder:
         if memory and memory.strip():
             sections.append(memory)
 
-        env_info = _build_env_info(self._tool_names)
+        env_info = _build_env_info(self._tool_registry.list_names())
         sections.append(env_info)
 
         if user_info:

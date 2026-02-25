@@ -80,14 +80,14 @@ class AutonomyManager:
         """Сформировать сообщение для подтверждения."""
         danger_labels = {
             DangerLevel.SAFE: "безопасно",
-            DangerLevel.MODERATE: "⚠️ умеренный риск",
-            DangerLevel.DANGEROUS: "🔴 опасно",
+            DangerLevel.MODERATE: "[!] умеренный риск",
+            DangerLevel.DANGEROUS: "[!!!] опасно",
         }
         label = danger_labels.get(danger_level, "неизвестно")
         args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
         return (
             f"Запрос на выполнение:\n"
-            f"🔧 **{tool_call.name}**({args_str})\n"
+            f"[tool] **{tool_call.name}**({args_str})\n"
             f"Уровень риска: {label}\n\n"
             f"Одобрить выполнение?"
         )

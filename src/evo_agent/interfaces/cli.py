@@ -13,6 +13,28 @@ from evo_agent.interfaces.base import BaseInterface, MessageHandler
 logger = logging.getLogger(__name__)
 
 
+def _safe_print(text: str) -> None:
+    """Безопасный вывод в консоль с полной поддержкой UTF-8."""
+    try:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+    except UnicodeEncodeError:
+        encoded = text.encode("utf-8", errors="replace")
+        sys.stdout.buffer.write(encoded + b"\n")
+        sys.stdout.buffer.flush()
+
+
+def _safe_input(prompt: str) -> str:
+    """Безопасный ввод с полной поддержкой UTF-8."""
+    try:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+    except UnicodeEncodeError:
+        sys.stdout.buffer.write(prompt.encode("utf-8", errors="replace"))
+        sys.stdout.buffer.flush()
+    return input()
+
+
 class CLIInterface(BaseInterface):
     """Консольный интерфейс для прямого взаимодействия."""
 
@@ -40,13 +62,14 @@ class CLIInterface(BaseInterface):
                 pass
         logger.info("CLI интерфейс остановлен")
 
-    async def send_message(self, user_id: str, text: str, **kwargs: Any) -> None:
-        print(f"\n🤖 Evo: {text}\n")
+    async def send_message(self, user_id: str, text: str, **kwargs: Any) -> bool:
+        _safe_print(f"\n[Evo]: {text}\n")
+        return True
 
     async def ask_approval(self, user_id: str, question: str) -> bool:
-        print(f"\n⚠️  {question}")
+        _safe_print(f"\n[!] {question}")
         loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(None, lambda: input("(y/n): ").strip().lower())
+        answer = await loop.run_in_executor(None, lambda: _safe_input("(y/n): ").strip().lower())
         return answer in ("y", "yes", "да", "д")
 
     async def _input_loop(self) -> None:
@@ -58,14 +81,17 @@ class CLIInterface(BaseInterface):
             source_type="cli",
         )
 
-        print("=" * 50)
-        print("Evo-Agent CLI. Введите сообщение (Ctrl+C для выхода).")
-        print("Команды: /status, /skills, /memory, /autonomy <N>, /quit")
-        print("=" * 50)
+        _safe_print("=" * 50)
+        _safe_print("Evo-Agent CLI. Введите сообщение (Ctrl+C для выхода).")
+        _safe_print("Команды: /status, /skills, /memory, /autonomy <N>, /quit")
+        _safe_print("=" * 50)
 
         while self._running:
             try:
-                text = await loop.run_in_executor(None, lambda: input(f"\n👤 {self._user_name}: "))
+                text = await loop.run_in_executor(
+                    None,
+                    lambda: _safe_input(f"\n[{self._user_name}]: "),
+                )
                 text = text.strip()
                 if not text:
                     continue

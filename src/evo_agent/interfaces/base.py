@@ -31,8 +31,12 @@ class BaseInterface(ABC):
         ...
 
     @abstractmethod
-    async def send_message(self, user_id: str, text: str, **kwargs: Any) -> None:
-        """Отправить сообщение пользователю."""
+    async def send_message(self, user_id: str, text: str, **kwargs: Any) -> bool:
+        """Отправить сообщение пользователю.
+        
+        Returns:
+            True если сообщение успешно отправлено, False иначе.
+        """
         ...
 
     @abstractmethod

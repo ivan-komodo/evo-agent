@@ -5,6 +5,11 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      - LANG=en_US.UTF-8
+      - LC_ALL=en_US.UTF-8
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUTF8=1
     volumes:
       - ./agent_data:/app/agent_data
       - ./extensions:/app/extensions

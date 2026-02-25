@@ -39,6 +39,11 @@ class TelegramInterface(BaseInterface):
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._polling_task: asyncio.Task | None = None
 
+    def update_allowed_users(self, allowed_users: list[int] | None) -> None:
+        """Обновить список разрешенных пользователей без рестарта."""
+        self._allowed_users = set(allowed_users) if allowed_users else None
+        logger.info("Список разрешенных пользователей обновлен: %s", self._allowed_users)
+
     async def start(self, on_message: MessageHandler) -> None:
         self._on_message = on_message
         self._bot = Bot(
@@ -72,19 +77,30 @@ class TelegramInterface(BaseInterface):
             await self._bot.session.close()
         logger.info("Telegram бот остановлен")
 
-    async def send_message(self, user_id: str, text: str, **kwargs: Any) -> None:
+    async def send_message(self, user_id: str, text: str, **kwargs: Any) -> bool:
         if not self._bot:
-            return
+            return False
         chat_id = int(user_id)
         chunks = _split_message(text)
+        success = True
+        
+        # Если в kwargs нет parse_mode, используем MARKDOWN по умолчанию
+        # Но если MARKDOWN падает, пробуем без него
+        current_kwargs = kwargs.copy()
+        if "parse_mode" not in current_kwargs:
+            current_kwargs["parse_mode"] = ParseMode.MARKDOWN
+
         for chunk in chunks:
             try:
-                await self._bot.send_message(chat_id, chunk, **kwargs)
-            except Exception:
+                await self._bot.send_message(chat_id, chunk, **current_kwargs)
+            except Exception as e:
+                logger.warning("Ошибка отправки с parse_mode: %s. Пробую без разметки.", e)
                 try:
                     await self._bot.send_message(chat_id, chunk, parse_mode=None)
                 except Exception:
-                    logger.exception("Не удалось отправить сообщение в %s", user_id)
+                    logger.exception("Не удалось отправить сообщение в %s даже без разметки", user_id)
+                    success = False
+        return success
 
     async def ask_approval(self, user_id: str, question: str) -> bool:
         if not self._bot:
@@ -103,11 +119,17 @@ class TelegramInterface(BaseInterface):
 
         chat_id = int(user_id)
         try:
+            # Сначала пробуем с MARKDOWN (по умолчанию в BotProperties)
             await self._bot.send_message(chat_id, question, reply_markup=keyboard)
-        except Exception:
-            logger.exception("Ошибка отправки запроса подтверждения")
-            self._pending_approvals.pop(approval_id, None)
-            return True
+        except Exception as e:
+            logger.warning("Ошибка ask_approval с разметкой: %s. Пробую без разметки.", e)
+            try:
+                # Если упало (например, из-за спецсимволов в путях/командах), пробуем без разметки
+                await self._bot.send_message(chat_id, question, reply_markup=keyboard, parse_mode=None)
+            except Exception:
+                logger.exception("Ошибка отправки запроса подтверждения даже без разметки")
+                self._pending_approvals.pop(approval_id, None)
+                return True
 
         try:
             return await asyncio.wait_for(future, timeout=300)
@@ -132,6 +154,8 @@ class TelegramInterface(BaseInterface):
                     "Команды:\n"
                     "/autonomy <0-3> -- уровень автономности\n"
                     "/status -- текущий статус\n"
+                    "/health -- отчёт о состоянии\n"
+                    "/reload -- перезагрузить инструменты и конфиг\n"
                     "/skills -- список навыков\n"
                     "/memory -- просмотр памяти\n\n"
                     "Просто пиши мне -- я готов помогать!"
@@ -156,6 +180,12 @@ class TelegramInterface(BaseInterface):
             elif cmd == "/status":
                 if self._on_message:
                     await self._on_message("__get_status", self._make_user_info(message))
+            elif cmd == "/health":
+                if self._on_message:
+                    await self._on_message("__get_health", self._make_user_info(message))
+            elif cmd == "/reload":
+                if self._on_message:
+                    await self._on_message("__reload_config", self._make_user_info(message))
             elif cmd == "/skills":
                 if self._on_message:
                     await self._on_message("__list_skills", self._make_user_info(message))
@@ -223,6 +253,22 @@ class TelegramInterface(BaseInterface):
         name = None
         if user:
             name = user.full_name or user.username
+        
+        # Обработка пересланных сообщений
+        text_prefix = ""
+        if message.forward_from:
+            f_user = message.forward_from
+            f_name = f_user.full_name or f_user.username
+            text_prefix = f"[ПЕРЕСЛАНО ОТ {f_name} (ID: {f_user.id})]:\n"
+        elif message.forward_from_chat:
+            f_chat = message.forward_from_chat
+            text_prefix = f"[ПЕРЕСЛАНО ИЗ ЧАТА {f_chat.title} (ID: {f_chat.id})]:\n"
+        elif message.forward_sender_name:
+            text_prefix = f"[ПЕРЕСЛАНО ОТ {message.forward_sender_name}]:\n"
+
+        if text_prefix and message.text:
+            message.text = text_prefix + message.text
+
         return UserInfo(
             user_id=str(message.chat.id),
             name=name,

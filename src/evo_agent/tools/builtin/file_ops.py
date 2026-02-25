@@ -92,7 +92,7 @@ class FileOpsTool(BaseTool):
             return self._fail(f"Директория не найдена: {path}", tid)
         entries = []
         for entry in sorted(path.iterdir()):
-            prefix = "📁 " if entry.is_dir() else "📄 "
+            prefix = "[DIR]  " if entry.is_dir() else "[FILE] "
             entries.append(f"{prefix}{entry.name}")
         if not entries:
             return self._ok("(пустая директория)", tid)

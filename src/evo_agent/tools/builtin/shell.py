@@ -1,9 +1,10 @@
-"""Кросс-платформенное исполнение shell-команд."""
+"""Кросс-платформенное исполнение shell-команд с полной поддержкой UTF-8/кириллицы."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import platform
 from typing import Any
 
@@ -13,6 +14,57 @@ from evo_agent.tools.base import BaseTool
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 60
+
+
+def _utf8_env() -> dict[str, str]:
+    """Возвращает копию окружения с принудительным UTF-8."""
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["LANG"] = env.get("LANG", "en_US.UTF-8")
+    env["LC_ALL"] = env.get("LC_ALL", "en_US.UTF-8")
+    return env
+
+
+def _smart_decode(data: bytes) -> str:
+    """Декодирование вывода подпроцесса с интеллектуальным определением кодировки.
+
+    Порядок: UTF-8 -> OEM-кодировка системы -> cp1251 -> cp866 -> latin-1 (fallback).
+    """
+    if not data:
+        return ""
+
+    try:
+        result = data.decode("utf-8")
+        if "\ufffd" not in result:
+            return result
+    except UnicodeDecodeError:
+        pass
+
+    fallback_encodings = []
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            oem_cp = ctypes.windll.kernel32.GetOEMCP()
+            acp = ctypes.windll.kernel32.GetACP()
+            fallback_encodings.append(f"cp{oem_cp}")
+            if f"cp{acp}" not in fallback_encodings:
+                fallback_encodings.append(f"cp{acp}")
+        except Exception:
+            pass
+        for enc in ["cp866", "cp1251", "cp1252"]:
+            if enc not in fallback_encodings:
+                fallback_encodings.append(enc)
+    else:
+        fallback_encodings.extend(["utf-8", "latin-1"])
+
+    for enc in fallback_encodings:
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    return data.decode("utf-8", errors="replace")
 
 
 class ShellTool(BaseTool):
@@ -65,6 +117,7 @@ class ShellTool(BaseTool):
         tool_call_id = kwargs.get("tool_call_id", "")
 
         shell_cmd = _build_shell_command(command, shell)
+        env = _utf8_env()
 
         logger.info("Shell [%s]: %s (cwd=%s, timeout=%d)", shell, command, cwd, timeout)
 
@@ -74,10 +127,11 @@ class ShellTool(BaseTool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=env,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            stdout_str = stdout.decode("utf-8", errors="replace").strip()
-            stderr_str = stderr.decode("utf-8", errors="replace").strip()
+            stdout_str = _smart_decode(stdout).strip()
+            stderr_str = _smart_decode(stderr).strip()
 
             parts = []
             if stdout_str:
@@ -107,7 +161,13 @@ def _detect_shell() -> str:
 
 def _build_shell_command(command: str, shell: str) -> str:
     if shell == "powershell":
-        return f'powershell -NoProfile -Command "{command}"'
+        return (
+            'powershell -NoProfile -Command "'
+            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+            '[Console]::InputEncoding = [System.Text.Encoding]::UTF8; '
+            '$OutputEncoding = [System.Text.Encoding]::UTF8; '
+            f'{command}"'
+        )
     elif shell == "cmd":
-        return f'cmd /c "{command}"'
+        return f'cmd /c "chcp 65001 >nul & {command}"'
     return command

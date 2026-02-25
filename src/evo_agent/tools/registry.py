@@ -21,10 +21,44 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
+        self._config: dict[str, Any] | None = None
+        self._extensions_dir: Path | None = None
+        self._skills_dir: Path | None = None
+        self._project_root: Path | None = None
+        self._people_db: Any = None
 
     @property
     def tools(self) -> dict[str, BaseTool]:
         return dict(self._tools)
+
+    def configure(
+        self,
+        config: dict[str, Any],
+        extensions_dir: Path,
+        skills_dir: Path,
+        project_root: Path,
+        people_db: Any,
+    ) -> None:
+        """Сохранить параметры для full_reload."""
+        self._config = config
+        self._extensions_dir = extensions_dir
+        self._skills_dir = skills_dir
+        self._project_root = project_root
+        self._people_db = people_db
+
+    def full_reload(self) -> int:
+        """Полная перезагрузка по сохранённым параметрам. Возвращает число tools."""
+        self._tools.clear()
+        self.load_builtin(self._config)
+        if self._project_root:
+            self.load_self_modify(self._project_root)
+        if self._people_db:
+            self.load_people_tool(self._people_db)
+        if self._extensions_dir:
+            self.load_extensions(self._extensions_dir)
+        if self._skills_dir:
+            self.load_skills(self._skills_dir)
+        return len(self._tools)
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool

@@ -122,7 +122,7 @@ class SelfModifyTool(BaseTool):
                 continue
             rel = path.relative_to(self._root)
             indent = "  " * (len(rel.parts) - 1)
-            prefix = "📁 " if path.is_dir() else "📄 "
+            prefix = "[DIR] " if path.is_dir() else "[FILE] "
             lines.append(f"{indent}{prefix}{rel.name}")
 
         return self._ok("\n".join(lines[:200]) if lines else "(пусто)", tid)

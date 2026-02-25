@@ -53,7 +53,7 @@ class RestartController:
 
         if self._notify:
             try:
-                await self._notify(f"🔄 Перезапускаюсь: {reason}")
+                await self._notify(f"[restart] Перезапускаюсь: {reason}")
             except Exception:
                 logger.exception("Ошибка уведомления о перезапуске")
 
@@ -62,6 +62,8 @@ class RestartController:
         try:
             env = os.environ.copy()
             env["EVO_RESTARTED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
 
             new_process = subprocess.Popen(
                 [sys.executable, "-m", "evo_agent"],
@@ -75,7 +77,7 @@ class RestartController:
             logger.exception("Не удалось запустить новый процесс")
             self._restarting = False
             if self._notify:
-                await self._notify("❌ Ошибка перезапуска, продолжаю работу")
+                await self._notify("[error] Ошибка перезапуска, продолжаю работу")
             return
 
         logger.info("Завершение текущего процесса...")
