@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
+import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message as TGMessage,
@@ -19,6 +21,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from evo_agent.core.types import UserInfo
 from evo_agent.interfaces.base import BaseInterface, MessageHandler
+from evo_agent.interfaces.telegram_formatter import normalize_for_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,7 @@ class TelegramInterface(BaseInterface):
         self._on_message = on_message
         self._bot = Bot(
             token=self._token,
-            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+            default=DefaultBotProperties(parse_mode=None),
         )
         self._dp = Dispatcher()
         self._register_handlers()
@@ -81,20 +84,22 @@ class TelegramInterface(BaseInterface):
         if not self._bot:
             return False
         chat_id = int(user_id)
-        chunks = _split_message(text)
-        success = True
-        
-        # Если в kwargs нет parse_mode, используем MARKDOWN по умолчанию
-        # Но если MARKDOWN падает, пробуем без него
         current_kwargs = kwargs.copy()
+        outgoing_text = text
+
+        # По умолчанию нормализуем markdown-подобный ответ в plain text.
         if "parse_mode" not in current_kwargs:
-            current_kwargs["parse_mode"] = ParseMode.MARKDOWN
+            outgoing_text = normalize_for_telegram(outgoing_text)
+            current_kwargs["parse_mode"] = None
+
+        chunks = _split_message(outgoing_text)
+        success = True
 
         for chunk in chunks:
             try:
                 await self._bot.send_message(chat_id, chunk, **current_kwargs)
             except Exception as e:
-                logger.warning("Ошибка отправки с parse_mode: %s. Пробую без разметки.", e)
+                logger.warning("Ошибка отправки сообщения: %s. Пробую резервный режим.", e)
                 try:
                     await self._bot.send_message(chat_id, chunk, parse_mode=None)
                 except Exception:
@@ -204,9 +209,30 @@ class TelegramInterface(BaseInterface):
                 return
             if self._on_message and self._bot and message.document:
                 file = await self._bot.get_file(message.document.file_id)
+                local_path = await self._download_document(file.file_path, message.document.file_name)
                 caption = message.caption or f"Получен файл: {message.document.file_name}"
-                text = f"{caption}\n[Файл: {message.document.file_name}, path: {file.file_path}]"
+                text = (
+                    f"{caption}\n"
+                    f"[Файл: {message.document.file_name}, telegram_path: {file.file_path}]\n"
+                    f"[Локальный путь: {local_path}]"
+                )
                 await self._on_message(text, self._make_user_info(message))
+
+        @self._dp.message(F.voice | F.audio | F.video | F.video_note | F.photo | F.sticker)
+        async def handle_media(message: TGMessage) -> None:
+            if not self._check_access(message):
+                return
+            if self._on_message:
+                synthetic = _build_non_text_message(message)
+                await self._on_message(synthetic, self._make_user_info(message))
+
+        @self._dp.message()
+        async def handle_other(message: TGMessage) -> None:
+            if not self._check_access(message):
+                return
+            if self._on_message:
+                synthetic = _build_non_text_message(message)
+                await self._on_message(synthetic, self._make_user_info(message))
 
         @self._dp.callback_query(F.data.startswith("approve:"))
         async def handle_approve(callback: CallbackQuery) -> None:
@@ -281,6 +307,30 @@ class TelegramInterface(BaseInterface):
             source_id=str(user.id) if user else None,
         )
 
+    async def _download_document(self, telegram_file_path: str, file_name: str | None) -> str:
+        """Скачать telegram-документ в локальную директорию и вернуть путь."""
+        if not telegram_file_path:
+            return ""
+
+        safe_name = Path(file_name or "document.bin").name
+        incoming_dir = Path.cwd() / "data" / "incoming" / "telegram"
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+
+        # file_unique_id не всегда доступен здесь, поэтому используем uuid-префикс
+        target_path = incoming_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+        url = f"https://api.telegram.org/file/bot{self._token}/{telegram_file_path}"
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                target_path.write_bytes(response.content)
+            logger.info("Документ скачан локально: %s", target_path)
+            return str(target_path)
+        except Exception:
+            logger.exception("Не удалось скачать документ из Telegram: %s", telegram_file_path)
+            return ""
+
 
 def _split_message(text: str) -> list[str]:
     """Разбить длинное сообщение на части."""
@@ -297,3 +347,36 @@ def _split_message(text: str) -> list[str]:
         chunks.append(text[:split_at])
         text = text[split_at:].lstrip("\n")
     return chunks
+
+
+def _build_non_text_message(message: TGMessage) -> str:
+    """Сформировать понятное текстовое событие для нетекстовых сообщений."""
+    parts: list[str] = []
+    content_type = getattr(message, "content_type", "unknown")
+    parts.append(f"[ВХОДЯЩЕЕ TELEGRAM СООБЩЕНИЕ: {content_type}]")
+
+    if message.voice:
+        parts.append(f"- Голосовое: длительность={message.voice.duration}с")
+    if message.audio:
+        title = message.audio.title or message.audio.file_name or "без названия"
+        parts.append(f"- Аудио: {title}, длительность={message.audio.duration}с")
+    if message.video:
+        parts.append(f"- Видео: {message.video.width}x{message.video.height}, длительность={message.video.duration}с")
+    if message.video_note:
+        parts.append(f"- Video note: длительность={message.video_note.duration}с")
+    if message.photo:
+        parts.append(f"- Фото: вариантов размеров={len(message.photo)}")
+    if message.sticker:
+        emoji = message.sticker.emoji or ""
+        parts.append(f"- Стикер: {message.sticker.set_name or 'unknown_set'} {emoji}")
+    if message.caption:
+        parts.append(f"- Подпись: {message.caption}")
+
+    if len(parts) == 1:
+        parts.append("- Получено нетекстовое сообщение без детальной информации.")
+
+    parts.append(
+        "Если это аудио/голосовое, прямой расшифровки пока нет. "
+        "Нужно вежливо сообщить пользователю это и предложить прислать текст или файл для обработки."
+    )
+    return "\n".join(parts)

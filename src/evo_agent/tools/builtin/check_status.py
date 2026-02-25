@@ -24,6 +24,7 @@ class CheckStatusTool(BaseTool):
         self._journal = journal
 
     async def execute(self, scope: str = "full", limit: int = 10, user_id: str | None = None, **kwargs: Any) -> ToolResult:
+        tool_call_id = str(kwargs.get("tool_call_id", ""))
         try:
             if scope == "my_errors":
                 # Ошибки текущего пользователя (если передан user_id)
@@ -44,7 +45,7 @@ class CheckStatusTool(BaseTool):
                     events = list(self._journal._entries)[-limit:]
 
             if not events:
-                return ToolResult(content="Событий не найдено.")
+                return self._ok("Событий не найдено.", tool_call_id=tool_call_id)
 
             lines = []
             for e in events:
@@ -54,6 +55,6 @@ class CheckStatusTool(BaseTool):
                 if e.details and scope == "full":
                     lines.append(f"  Details: {e.details[:200]}")
 
-            return ToolResult(content="\n".join(lines))
+            return self._ok("\n".join(lines), tool_call_id=tool_call_id)
         except Exception as e:
-            return ToolResult(content=f"Ошибка при получении статуса: {e}", success=False)
+            return self._fail(f"Ошибка при получении статуса: {e}", tool_call_id=tool_call_id)

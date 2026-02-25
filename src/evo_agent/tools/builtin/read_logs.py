@@ -23,8 +23,9 @@ class ReadLogsTool(BaseTool):
         self._log_file = log_file
 
     async def execute(self, lines: int = 50, level: str = "all", search: str | None = None, **kwargs: Any) -> ToolResult:
+        tool_call_id = str(kwargs.get("tool_call_id", ""))
         if not self._log_file.exists():
-            return ToolResult(content=f"Файл лога не найден: {self._log_file}", success=False)
+            return self._fail(f"Файл лога не найден: {self._log_file}", tool_call_id=tool_call_id)
         
         try:
             with open(self._log_file, "r", encoding="utf-8", errors="replace") as f:
@@ -44,8 +45,8 @@ class ReadLogsTool(BaseTool):
             content = "".join(result_lines)
             
             if not content:
-                return ToolResult(content="Записей не найдено по вашему запросу.")
+                return self._ok("Записей не найдено по вашему запросу.", tool_call_id=tool_call_id)
                 
-            return ToolResult(content=content)
+            return self._ok(content, tool_call_id=tool_call_id)
         except Exception as e:
-            return ToolResult(content=f"Ошибка при чтении логов: {e}", success=False)
+            return self._fail(f"Ошибка при чтении логов: {e}", tool_call_id=tool_call_id)
