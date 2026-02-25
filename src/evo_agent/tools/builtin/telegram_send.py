@@ -22,16 +22,27 @@ class TelegramSendTool(BaseTool):
         self._interface = interface
 
     async def execute(self, chat_id: str, text: str, **kwargs: Any) -> ToolResult:
-        """Отправить сообщение в Telegram.
-        Возвращает ToolResult с заполненными полями name и tool_call_id через базовые методы.
-        """
+        """Отправить сообщение в Telegram."""
+        tool_call_id = str(kwargs.get("tool_call_id", ""))
         try:
             if not hasattr(self._interface, "send_message"):
-                return self._fail("Текущий интерфейс не поддерживает отправку сообщений в Telegram")
+                return self._fail(
+                    "Текущий интерфейс не поддерживает отправку сообщений в Telegram",
+                    tool_call_id=tool_call_id,
+                )
             success = await self._interface.send_message(chat_id, text)
             if success:
-                return self._ok(f"Сообщение успешно отправлено в чат {chat_id}")
+                return self._ok(
+                    f"Сообщение успешно отправлено в чат {chat_id}",
+                    tool_call_id=tool_call_id,
+                )
             else:
-                return self._fail(f"Не удалось отправить сообщение в чат {chat_id}")
+                return self._fail(
+                    f"Не удалось отправить сообщение в чат {chat_id}",
+                    tool_call_id=tool_call_id,
+                )
         except Exception as e:
-            return self._fail(f"Ошибка при отправке через Telegram: {e}")
+            return self._fail(
+                f"Ошибка при отправке через Telegram: {e}",
+                tool_call_id=tool_call_id,
+            )

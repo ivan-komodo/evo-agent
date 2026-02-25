@@ -119,17 +119,12 @@ class TelegramInterface(BaseInterface):
 
         chat_id = int(user_id)
         try:
-            # Сначала пробуем с MARKDOWN (по умолчанию в BotProperties)
-            await self._bot.send_message(chat_id, question, reply_markup=keyboard)
-        except Exception as e:
-            logger.warning("Ошибка ask_approval с разметкой: %s. Пробую без разметки.", e)
-            try:
-                # Если упало (например, из-за спецсимволов в путях/командах), пробуем без разметки
-                await self._bot.send_message(chat_id, question, reply_markup=keyboard, parse_mode=None)
-            except Exception:
-                logger.exception("Ошибка отправки запроса подтверждения даже без разметки")
-                self._pending_approvals.pop(approval_id, None)
-                return True
+            # Для подтверждений всегда plain text: в аргументах часто спецсимволы.
+            await self._bot.send_message(chat_id, question, reply_markup=keyboard, parse_mode=None)
+        except Exception:
+            logger.exception("Ошибка отправки запроса подтверждения")
+            self._pending_approvals.pop(approval_id, None)
+            return True
 
         try:
             return await asyncio.wait_for(future, timeout=300)
@@ -220,9 +215,14 @@ class TelegramInterface(BaseInterface):
             if future and not future.done():
                 future.set_result(True)
             if callback.message:
-                await callback.message.edit_text(
-                    callback.message.text + "\n\n✅ **Одобрено**"
-                )
+                edited_text = (callback.message.text or "") + "\n\n[OK] Одобрено"
+                try:
+                    await callback.message.edit_text(edited_text)
+                except Exception:
+                    try:
+                        await callback.message.edit_text(edited_text, parse_mode=None)
+                    except Exception:
+                        logger.exception("Не удалось отредактировать сообщение approve")
             await callback.answer("Одобрено")
 
         @self._dp.callback_query(F.data.startswith("reject:"))
@@ -232,9 +232,14 @@ class TelegramInterface(BaseInterface):
             if future and not future.done():
                 future.set_result(False)
             if callback.message:
-                await callback.message.edit_text(
-                    callback.message.text + "\n\n❌ **Отклонено**"
-                )
+                edited_text = (callback.message.text or "") + "\n\n[X] Отклонено"
+                try:
+                    await callback.message.edit_text(edited_text)
+                except Exception:
+                    try:
+                        await callback.message.edit_text(edited_text, parse_mode=None)
+                    except Exception:
+                        logger.exception("Не удалось отредактировать сообщение reject")
             await callback.answer("Отклонено")
 
     def _check_access(self, message: TGMessage) -> bool:

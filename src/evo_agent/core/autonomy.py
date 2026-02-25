@@ -84,10 +84,49 @@ class AutonomyManager:
             DangerLevel.DANGEROUS: "[!!!] опасно",
         }
         label = danger_labels.get(danger_level, "неизвестно")
-        args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
+        args_str = _format_tool_args(tool_call.arguments)
         return (
             f"Запрос на выполнение:\n"
-            f"[tool] **{tool_call.name}**({args_str})\n"
+            f"[tool] {tool_call.name}({args_str})\n"
             f"Уровень риска: {label}\n\n"
             f"Одобрить выполнение?"
         )
+
+
+def _format_tool_args(arguments: dict[str, Any], max_items: int = 5) -> str:
+    """Компактно форматировать аргументы tool call для UI подтверждения."""
+    if not arguments:
+        return ""
+
+    parts: list[str] = []
+    items = list(arguments.items())
+    for key, value in items[:max_items]:
+        parts.append(f"{key}={_format_arg_value(value)}")
+
+    if len(items) > max_items:
+        parts.append(f"... +{len(items) - max_items} арг.")
+    return ", ".join(parts)
+
+
+def _format_arg_value(value: Any, max_len: int = 120) -> str:
+    """Безопасное и короткое отображение значения аргумента."""
+    if isinstance(value, str):
+        compact = " ".join(value.split())
+        if len(compact) > max_len:
+            preview = compact[:max_len]
+            return f"'{preview}...'(len={len(compact)})"
+        return repr(compact)
+
+    if isinstance(value, (int, float, bool)) or value is None:
+        return repr(value)
+
+    if isinstance(value, dict):
+        return f"<dict keys={list(value.keys())[:5]}>"
+
+    if isinstance(value, list):
+        return f"<list len={len(value)}>"
+
+    text = repr(value)
+    if len(text) > max_len:
+        return f"{text[:max_len]}...(len={len(text)})"
+    return text
