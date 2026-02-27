@@ -156,6 +156,8 @@ class TelegramInterface(BaseInterface):
                     "/status -- текущий статус\n"
                     "/health -- отчёт о состоянии\n"
                     "/reload -- перезагрузить инструменты и конфиг\n"
+                    "/tasks -- список задач планировщика\n"
+                    "/cancel <id> -- отменить задачу\n"
                     "/skills -- список навыков\n"
                     "/memory -- просмотр памяти\n\n"
                     "Просто пиши мне -- я готов помогать!"
@@ -186,6 +188,16 @@ class TelegramInterface(BaseInterface):
             elif cmd == "/reload":
                 if self._on_message:
                     await self._on_message("__reload_config", self._make_user_info(message))
+            elif cmd == "/tasks":
+                if self._on_message:
+                    await self._on_message("__list_tasks", self._make_user_info(message))
+            elif cmd == "/cancel":
+                parts = text.split()
+                if len(parts) < 2:
+                    await message.answer("Использование: /cancel <id>")
+                    return
+                if self._on_message:
+                    await self._on_message(f"__cancel_task:{parts[1]}", self._make_user_info(message))
             elif cmd == "/skills":
                 if self._on_message:
                     await self._on_message("__list_skills", self._make_user_info(message))

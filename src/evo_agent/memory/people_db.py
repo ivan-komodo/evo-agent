@@ -219,3 +219,40 @@ class PeopleDB:
             )
             await db.commit()
         return f"Предпочтение '{key}' установлено для person_id={person_id}"
+
+    async def get_preference(self, person_id: int, key: str) -> str | None:
+        """Получить предпочтение по ключу."""
+        async with aiosqlite.connect(self._db_path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT value FROM people_preferences WHERE person_id = ? AND key = ?",
+                (person_id, key),
+            )
+        if not rows:
+            return None
+        return str(rows[0][0])
+
+    async def get_person_id_by_source(self, source_type: str, source_id: str) -> int | None:
+        """Получить person_id по source_type/source_id."""
+        async with aiosqlite.connect(self._db_path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM people WHERE source_type = ? AND source_id = ?",
+                (source_type, source_id),
+            )
+        if not rows:
+            return None
+        return int(rows[0][0])
+
+    async def get_timezone_by_source(self, source_type: str, source_id: str) -> str | None:
+        """Получить timezone пользователя по источнику."""
+        person_id = await self.get_person_id_by_source(source_type, source_id)
+        if person_id is None:
+            return None
+        return await self.get_preference(person_id, "timezone")
+
+    async def set_timezone_by_source(self, source_type: str, source_id: str, timezone_name: str) -> bool:
+        """Сохранить timezone пользователя по источнику."""
+        person_id = await self.get_person_id_by_source(source_type, source_id)
+        if person_id is None:
+            return False
+        await self.set_preference(person_id, "timezone", timezone_name)
+        return True

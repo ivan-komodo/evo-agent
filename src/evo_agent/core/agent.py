@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import traceback
+from datetime import datetime, timezone
 from typing import Any
 
 from evo_agent.core.action_journal import ActionJournal, JournalEntry
@@ -23,6 +24,7 @@ from evo_agent.knowledge.manager import KnowledgeManager
 from evo_agent.llm.base import LLMProvider
 from evo_agent.memory.conversation import ConversationStore
 from evo_agent.memory.summarizer import ConversationSummarizer
+from evo_agent.scheduler.store import ScheduledTask, SchedulerStore
 from evo_agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class Agent:
         summarizer: ConversationSummarizer | None = None,
         monitor: AgentMonitor | None = None,
         journal: ActionJournal | None = None,
+        scheduler_store: SchedulerStore | None = None,
         max_iterations: int = 25,
     ):
         self._llm = llm
@@ -55,6 +58,7 @@ class Agent:
         self._summarizer = summarizer
         self._monitor = monitor
         self._journal = journal
+        self._scheduler_store = scheduler_store
         self._max_iterations = max_iterations
 
         self._context_builder = ContextBuilder(
@@ -116,7 +120,10 @@ class Agent:
             extensions_dir=project_root / "extensions",
             skills_dir=agent_data_dir / "skills",
             project_root=project_root,
-            people_db=self._tools._people_db # Сохраняем ссылку на БД
+            people_db=self._tools._people_db, # Сохраняем ссылку на БД
+            journal=self._journal,
+            interface=self._interface,
+            scheduler_store=self._scheduler_store,
         )
         self._tools.full_reload()
         
@@ -206,6 +213,51 @@ class Agent:
                 await self._interface.send_message(user_id, "Мониторинг не активен.")
             return
 
+        if text == "__scheduler_status":
+            if self._scheduler_store:
+                tasks = await self._scheduler_store.list_tasks(user_id=user_id, include_done=False)
+                await self._interface.send_message(
+                    user_id,
+                    f"Scheduler активен. Активных задач: {len(tasks)}",
+                )
+            else:
+                await self._interface.send_message(user_id, "Scheduler не активен.")
+            return
+
+        if text == "__list_tasks":
+            if self._scheduler_store:
+                tasks = await self._scheduler_store.list_tasks(user_id=user_id, include_done=True)
+                if not tasks:
+                    await self._interface.send_message(user_id, "Задач нет.")
+                else:
+                    lines = ["Ваши задачи:"]
+                    for t in tasks[:100]:
+                        lines.append(
+                            f"- id={t.id} status={t.status} type={t.schedule_type} "
+                            f"next={t.next_run_at_utc.isoformat()} tool={t.tool_name}"
+                        )
+                    await self._interface.send_message(user_id, "\n".join(lines))
+            else:
+                await self._interface.send_message(user_id, "Scheduler не активен.")
+            return
+
+        if text.startswith("__cancel_task:"):
+            if not self._scheduler_store:
+                await self._interface.send_message(user_id, "Scheduler не активен.")
+                return
+            raw = text.split(":", 1)[1].strip()
+            try:
+                task_id = int(raw)
+            except ValueError:
+                await self._interface.send_message(user_id, "Неверный id задачи.")
+                return
+            ok = await self._scheduler_store.cancel_task(task_id=task_id, user_id=user_id)
+            if ok:
+                await self._interface.send_message(user_id, f"Задача {task_id} отменена.")
+            else:
+                await self._interface.send_message(user_id, f"Задача {task_id} не найдена или уже неактивна.")
+            return
+
         logger.info("Сообщение от %s (%s): %s",
                      user_info.name or "?", user_id, text[:100])
 
@@ -275,7 +327,11 @@ class Agent:
                     await self._conversation_store.save_message(user_id, assistant_msg)
 
                 for tool_call in response.tool_calls:
-                    result = await self._execute_tool(user_id, tool_call)
+                    result = await self._execute_tool(
+                        user_id,
+                        tool_call,
+                        user_info=user_info,
+                    )
                     tool_msg = Message(
                         role="tool",
                         content=result.content,
@@ -312,7 +368,14 @@ class Agent:
             user_id, f"[!] Достигнут лимит итераций ({self._max_iterations})"
         )
 
-    async def _execute_tool(self, user_id: str, tool_call: ToolCall) -> ToolResult:
+    async def _execute_tool(
+        self,
+        user_id: str,
+        tool_call: ToolCall,
+        *,
+        user_info: UserInfo | None = None,
+        skip_approval: bool = False,
+    ) -> ToolResult:
         """Выполнить инструмент с проверкой автономности."""
         tool = self._tools.get(tool_call.name)
         if tool is None:
@@ -325,22 +388,28 @@ class Agent:
                 success=False,
             )
 
-        approved = await self._autonomy.request_approval(
-            user_id, tool_call, tool.danger_level
-        )
-        if not approved:
-            logger.info("Tool %s отклонён пользователем", tool_call.name)
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                name=tool_call.name,
-                content="Действие отклонено пользователем. Попробуй другой подход.",
-                success=False,
+        if not skip_approval:
+            approved = await self._autonomy.request_approval(
+                user_id, tool_call, tool.danger_level
             )
+            if not approved:
+                logger.info("Tool %s отклонён пользователем", tool_call.name)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    content="Действие отклонено пользователем. Попробуй другой подход.",
+                    success=False,
+                )
 
         logger.info("Выполняю tool: %s(%s)", tool_call.name,
                      ", ".join(f"{k}={v!r}" for k, v in list(tool_call.arguments.items())[:3]))
         try:
-            result = await tool.execute(tool_call_id=tool_call.id, **tool_call.arguments)
+            enriched_args = dict(tool_call.arguments)
+            if user_info:
+                enriched_args.setdefault("_caller_user_id", user_info.user_id)
+                enriched_args.setdefault("_caller_source_type", user_info.source_type)
+                enriched_args.setdefault("_caller_source_id", user_info.source_id or user_info.user_id)
+            result = await tool.execute(tool_call_id=tool_call.id, **enriched_args)
             
             # Обогащаем результат префиксами
             if result.success:
@@ -385,6 +454,22 @@ class Agent:
                 content=f"[ОШИБКА] {err_msg}",
                 success=False,
             )
+
+    async def execute_scheduled_task(self, task: ScheduledTask) -> tuple[bool, str]:
+        """Исполнить задачу планировщика через общий пайплайн инструментов."""
+        synthetic_call = ToolCall(
+            id=f"sched-{task.id}-{int(datetime.now(timezone.utc).timestamp())}",
+            name=task.tool_name,
+            arguments=task.args,
+        )
+        user_info = UserInfo(user_id=task.user_id, source_type="scheduler", source_id=task.user_id)
+        result = await self._execute_tool(
+            task.user_id,
+            synthetic_call,
+            user_info=user_info,
+            skip_approval=True,
+        )
+        return result.success, result.content
 
     def _build_status(self) -> str:
         """Сформировать статус агента."""

@@ -26,6 +26,9 @@ class ToolRegistry:
         self._skills_dir: Path | None = None
         self._project_root: Path | None = None
         self._people_db: Any = None
+        self._journal: Any = None
+        self._interface: Any = None
+        self._scheduler_store: Any = None
 
     @property
     def tools(self) -> dict[str, BaseTool]:
@@ -38,6 +41,9 @@ class ToolRegistry:
         skills_dir: Path,
         project_root: Path,
         people_db: Any,
+        journal: Any = None,
+        interface: Any = None,
+        scheduler_store: Any = None,
     ) -> None:
         """Сохранить параметры для full_reload."""
         self._config = config
@@ -45,6 +51,9 @@ class ToolRegistry:
         self._skills_dir = skills_dir
         self._project_root = project_root
         self._people_db = people_db
+        self._journal = journal
+        self._interface = interface
+        self._scheduler_store = scheduler_store
 
     def full_reload(self) -> int:
         """Полная перезагрузка по сохранённым параметрам. Возвращает число tools."""
@@ -54,11 +63,37 @@ class ToolRegistry:
             self.load_self_modify(self._project_root)
         if self._people_db:
             self.load_people_tool(self._people_db)
+        self._load_runtime_tools()
         if self._extensions_dir:
             self.load_extensions(self._extensions_dir)
         if self._skills_dir:
             self.load_skills(self._skills_dir)
         return len(self._tools)
+
+    def _load_runtime_tools(self) -> None:
+        """Загрузить runtime tools, зависящие от интерфейса/журнала/scheduler."""
+        if not self._project_root:
+            return
+
+        from evo_agent.tools.builtin.read_logs import ReadLogsTool
+        self.register(ReadLogsTool(self._project_root / "logs" / "evo_agent.log"))
+
+        if self._journal is not None:
+            from evo_agent.tools.builtin.check_status import CheckStatusTool
+            self.register(CheckStatusTool(self._journal))
+
+        if self._interface is not None:
+            from evo_agent.tools.builtin.telegram_send import TelegramSendTool
+            self.register(TelegramSendTool(self._interface))
+
+        if self._scheduler_store is not None:
+            from evo_agent.tools.builtin.list_tasks import ListTasksTool
+            from evo_agent.tools.builtin.cancel_task import CancelTaskTool
+            self.register(ListTasksTool(self._scheduler_store))
+            self.register(CancelTaskTool(self._scheduler_store))
+            if self._people_db is not None:
+                from evo_agent.tools.builtin.schedule_task import ScheduleTaskTool
+                self.register(ScheduleTaskTool(self._scheduler_store, self._people_db))
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool

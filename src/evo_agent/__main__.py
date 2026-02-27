@@ -29,6 +29,8 @@ from evo_agent.knowledge.manager import KnowledgeManager
 from evo_agent.memory.people_db import PeopleDB
 from evo_agent.memory.conversation import ConversationStore
 from evo_agent.memory.summarizer import ConversationSummarizer
+from evo_agent.scheduler.loop import SchedulerLoop
+from evo_agent.scheduler.store import SchedulerStore
 from evo_agent.interfaces.base import BaseInterface
 
 
@@ -132,6 +134,18 @@ async def run(mode: str = "telegram") -> None:
     await people_db.init()
     tool_registry.load_people_tool(people_db)
 
+    # -- Scheduler DB --
+    scheduler_store = SchedulerStore(project_root / "data" / "scheduler.db")
+    await scheduler_store.init()
+
+    # -- Scheduler Tools --
+    from evo_agent.tools.builtin.schedule_task import ScheduleTaskTool
+    from evo_agent.tools.builtin.list_tasks import ListTasksTool
+    from evo_agent.tools.builtin.cancel_task import CancelTaskTool
+    tool_registry.register(ScheduleTaskTool(scheduler_store, people_db))
+    tool_registry.register(ListTasksTool(scheduler_store))
+    tool_registry.register(CancelTaskTool(scheduler_store))
+
     # -- Python Skills --
     agent_data_dir = project_root / "agent_data"
     tool_registry.load_skills(agent_data_dir / "skills")
@@ -143,6 +157,9 @@ async def run(mode: str = "telegram") -> None:
         skills_dir=agent_data_dir / "skills",
         project_root=project_root,
         people_db=people_db,
+        journal=journal,
+        interface=interface,
+        scheduler_store=scheduler_store,
     )
 
     logger.info("Загружено инструментов: %d (%s)",
@@ -191,7 +208,14 @@ async def run(mode: str = "telegram") -> None:
         summarizer=summarizer,
         monitor=monitor,
         journal=journal,
+        scheduler_store=scheduler_store,
         max_iterations=max_iter,
+    )
+
+    scheduler_loop = SchedulerLoop(
+        store=scheduler_store,
+        executor=agent,
+        journal=journal,
     )
 
     # -- Запуск --
@@ -209,6 +233,7 @@ async def run(mode: str = "telegram") -> None:
             pass
 
     await agent.start()
+    await scheduler_loop.start()
     logger.info("Evo-Agent запущен и готов к работе!")
 
     try:
@@ -217,6 +242,7 @@ async def run(mode: str = "telegram") -> None:
         pass
     finally:
         logger.info("Остановка агента...")
+        await scheduler_loop.stop()
         await agent.stop()
         await llm_registry.close_all()
         logger.info("Evo-Agent остановлен")
